@@ -1,0 +1,1 @@
+# Wavelet-Scattering---S-Mamba-based-bitcoin-price-forecasting-with-hardware-acceleration
