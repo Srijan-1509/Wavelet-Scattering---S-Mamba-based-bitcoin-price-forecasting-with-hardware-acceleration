@@ -109,6 +109,9 @@ class SelectiveSSM(nn.Module):
             regime_gate = 1.0 + self.regime_proj(regime_signal)  # (B, T, d_inner)
             delta = delta * regime_gate
 
+        # Clamp delta to prevent numerical instability
+        delta = delta.clamp(min=1e-6, max=5.0)
+
         A = -torch.exp(self.A_log)
 
         y = self._selective_scan(x_conv, delta, A, B, C)
@@ -125,7 +128,7 @@ class SelectiveSSM(nn.Module):
 
         log_A_bar = delta.unsqueeze(-1) * A.unsqueeze(0).unsqueeze(0)
         B_bar = delta.unsqueeze(-1) * B.unsqueeze(2)
-        S = log_A_bar.cumsum(dim=1)
+        S = log_A_bar.cumsum(dim=1).clamp(-15, 15)  # prevent exp overflow
         exp_S = torch.exp(S)
         exp_neg_S = torch.exp(-S)
         term = B_bar * x.unsqueeze(-1) * exp_neg_S
