@@ -1,0 +1,552 @@
+================================================================================
+  VIVADO IMPLEMENTATION MANUAL — VIO / ILA / BRAM DEBUG GUIDE
+  Adaptive-Precision Wavelet Scattering Accelerator
+================================================================================
+
+TABLE OF CONTENTS
+  1. Project Setup
+  2. Creating the VIO IP Core
+  3. Creating the ILA IP Core
+  4. BRAM Inference & Verification
+  5. Synthesis & Implementation
+  6. Bitstream Generation & Programming
+  7. Hardware Manager: Using VIO
+  8. Hardware Manager: Using ILA
+  9. ILA Triggering — Complete Guide
+  10. Running a Full Test on Hardware
+  11. Troubleshooting
+
+================================================================================
+ 1. PROJECT SETUP
+================================================================================
+
+  1.1  Open Vivado → Create Project
+       - Project Name: wavelet_accel
+       - Project Type: RTL Project
+       - Target Board: Select your FPGA board (Zybo / Basys3 / Nexys A7 / etc.)
+         OR select Part manually (e.g., xc7z020clg400-1 for Zynq)
+
+  1.2  Add Sources
+       - Click "Add Sources" → Add or Create Design Sources
+       - Add these files:
+           ✓ adaptive_wavelet_accelerator.v
+           ✓ energy_detector.v
+           ✓ wavelet_filterbank.v
+           ✓ top_fpga_debug.v              ← SET THIS AS TOP MODULE
+
+       - Add Simulation Sources (separate fileset):
+           ✓ tb_adaptive_wavelet.v
+
+  1.3  Add Constraints
+       - Add or Create Constraints
+       - Add: constraints.xdc
+       - EDIT constraints.xdc: Uncomment and set the correct clock pin for
+         your specific board
+
+  1.4  Set Top Module
+       - In Sources panel, right-click top_fpga_debug → Set as Top
+
+
+================================================================================
+ 2. CREATING THE VIO IP CORE
+================================================================================
+
+  2.1  Open IP Catalog
+       - Window → IP Catalog (or click IP Catalog in Flow Navigator)
+
+  2.2  Search: "VIO" → select "VIO (Virtual Input/Output)"
+
+  2.3  Configure VIO:
+       ┌─────────────────────────────────────────────────────┐
+       │  Component Name:  vio_control                       │
+       │                                                     │
+       │  General Options tab:                               │
+       │    Input Probe Count:   5                           │
+       │    Output Probe Count:  7                           │
+       │                                                     │
+       │  PROBE_IN Ports tab:                                │
+       │    probe_in0  → Width: 1                            │
+       │    probe_in1  → Width: 1                            │
+       │    probe_in2  → Width: 32                           │
+       │    probe_in3  → Width: 32                           │
+       │    probe_in4  → Width: 16                           │
+       │                                                     │
+       │  PROBE_OUT Ports tab:                               │
+       │    probe_out0 → Width: 1   Initial Value: 0x0      │
+       │    probe_out1 → Width: 1   Initial Value: 0x0      │
+       │    probe_out2 → Width: 32  Initial Value: 0x8000   │
+       │    probe_out3 → Width: 1   Initial Value: 0x0      │
+       │    probe_out4 → Width: 11  Initial Value: 0x0      │
+       │    probe_out5 → Width: 16  Initial Value: 0x0      │
+       │    probe_out6 → Width: 11  Initial Value: 0x0      │
+       └─────────────────────────────────────────────────────┘
+
+  2.4  Click OK → Generate
+
+  2.5  VIO Probe Mapping (for your reference):
+       ┌────────────────┬───────────┬────────────────────────┐
+       │ VIO Probe      │ Direction │ Signal                 │
+       ├────────────────┼───────────┼────────────────────────┤
+       │ probe_out0 [1] │ PC→FPGA   │ rst_n (active-low)     │
+       │ probe_out1 [1] │ PC→FPGA   │ start                  │
+       │ probe_out2[32] │ PC→FPGA   │ energy_threshold       │
+       │ probe_out3 [1] │ PC→FPGA   │ input_we               │
+       │ probe_out4[11] │ PC→FPGA   │ input_addr             │
+       │ probe_out5[16] │ PC→FPGA   │ input_wdata            │
+       │ probe_out6[11] │ PC→FPGA   │ output_addr            │
+       ├────────────────┼───────────┼────────────────────────┤
+       │ probe_in0  [1] │ FPGA→PC   │ done                   │
+       │ probe_in1  [1] │ FPGA→PC   │ precision_mode         │
+       │ probe_in2 [32] │ FPGA→PC   │ current_energy         │
+       │ probe_in3 [32] │ FPGA→PC   │ total_cycles           │
+       │ probe_in4 [16] │ FPGA→PC   │ output_rdata           │
+       └────────────────┴───────────┴────────────────────────┘
+
+
+================================================================================
+ 3. CREATING THE ILA IP CORE
+================================================================================
+
+  3.1  IP Catalog → Search "ILA" → select "ILA (Integrated Logic Analyzer)"
+
+  3.2  Configure ILA:
+       ┌─────────────────────────────────────────────────────┐
+       │  Component Name:  ila_monitor                       │
+       │                                                     │
+       │  General Options tab:                               │
+       │    Monitor Type:         Native                     │
+       │    Number of Probes:     8                          │
+       │    Sample Data Depth:    4096  (or 8192/16384)      │
+       │    Same/Separate Trigger and Storage: SAME          │
+       │    Enable Trigger Out Port: NO                      │
+       │    Enable Input Pipe Stages: 0                      │
+       │                                                     │
+       │  Probe_Ports tab:                                   │
+       │    probe0  → Width: 1   (start)                     │
+       │    probe1  → Width: 1   (done)                      │
+       │    probe2  → Width: 1   (precision_mode)            │
+       │    probe3  → Width: 32  (current_energy)            │
+       │    probe4  → Width: 16  (output_rdata)              │
+       │    probe5  → Width: 32  (total_cycles)              │
+       │    probe6  → Width: 16  (precision_switches)        │
+       │    probe7  → Width: 16  (vio_input_wdata)           │
+       └─────────────────────────────────────────────────────┘
+
+  3.3  Click OK → Generate
+
+  NOTE on Sample Data Depth:
+    - 4096:  captures ~41 μs at 100 MHz — enough for small runs
+    - 8192:  captures ~82 μs — good for seeing precision switches
+    - 16384: captures ~164 μs — use if BRAM budget allows
+
+
+================================================================================
+ 4. BRAM INFERENCE & VERIFICATION
+================================================================================
+
+  The Verilog code uses inferred BRAM (reg arrays with synchronous read/write).
+  Vivado will automatically map these to Block RAM.
+
+  4.1  After Synthesis, verify BRAM usage:
+       - Open Synthesized Design → Report Utilization
+       - Check "Block RAM Tile" row — you should see ~5 BRAMs used:
+           * input_bram:      1 × 36Kb BRAM (2048 × 16-bit)
+           * output_bram_s0:  1 × 36Kb BRAM
+           * output_bram_s1:  1 × 36Kb BRAM
+           * output_bram_s2:  1 × 36Kb BRAM
+           * output_bram_s3:  1 × 36Kb BRAM
+
+  4.2  If Vivado uses Distributed RAM instead (LUT-based):
+       - Open constraints.xdc
+       - Uncomment the RAM_STYLE lines at the bottom
+       - Re-synthesize
+
+  4.3  To view BRAM placement:
+       - Open Implemented Design → Device view
+       - Click on BRAM tiles (tall blue columns) to see mapping
+
+  NOTE: You do NOT need to use Vivado Block Memory Generator IP.
+        The inferred BRAM from Verilog code is preferred because:
+        - Simpler code (no IP instantiation)
+        - Portable across different FPGA families
+        - Vivado handles initialization correctly from 'initial' blocks
+        - Only use BRAM IP if you need external .coe initialization files
+
+
+================================================================================
+ 5. SYNTHESIS & IMPLEMENTATION
+================================================================================
+
+  5.1  Run Synthesis
+       - Flow Navigator → Run Synthesis
+       - Wait for completion (check Messages tab for warnings)
+
+  5.2  Common Synthesis Warnings (safe to ignore):
+       - "Signal has no load" — unused metric signals
+       - "ROM/RAM mapped to Block RAM" — expected behavior
+       - "Multi-driven net" — should NOT appear (this is an error)
+
+  5.3  Review Synthesis Report
+       - Open Synthesized Design → Report Utilization
+       - Expected resources (approximate, MAX_N=256):
+           * LUTs:   ~800-1200
+           * FFs:    ~400-600
+           * DSPs:   2-4 (for multipliers)
+           * BRAMs:  5-7 (data + debug cores)
+
+  5.4  Run Implementation
+       - Flow Navigator → Run Implementation
+       - Check timing: Open Implemented Design → Report Timing Summary
+       - All paths should have positive slack at 100 MHz
+
+  5.5  If Timing Fails:
+       - Reduce clock frequency in constraints.xdc (try 50 MHz: period 20.000)
+       - Or: enable retiming in Synthesis Settings → -retiming
+
+
+================================================================================
+ 6. BITSTREAM GENERATION & PROGRAMMING
+================================================================================
+
+  6.1  Generate Bitstream
+       - Flow Navigator → Generate Bitstream
+       - Wait for completion
+
+  6.2  Program FPGA
+       - Flow Navigator → Open Hardware Manager → Open Target → Auto Connect
+       - Click "Program Device"
+       - Select the .bit file (in project_dir/project_name.runs/impl_1/)
+       - Click "Program"
+
+  6.3  After programming, VIO and ILA dashboards automatically appear
+       in the Hardware Manager window
+
+
+================================================================================
+ 7. HARDWARE MANAGER: USING VIO
+================================================================================
+
+  After programming, the VIO dashboard appears in Hardware Manager.
+
+  7.1  VIO Dashboard Layout
+       - hw_vio_1 window shows all probes
+       - OUTPUT probes (probe_out): you can WRITE values
+       - INPUT probes (probe_in):   you can READ values (auto-updating)
+
+  7.2  Step-by-Step: Reset the Design
+       a) Find probe_out0 (rst_n)
+       b) Set value to 0x0 (assert reset)
+       c) Wait 1 second
+       d) Set value to 0x1 (release reset)
+
+  7.3  Step-by-Step: Write One Sample to Input BRAM
+       a) Set probe_out4 (input_addr)  = 0x000  (address 0)
+       b) Set probe_out5 (input_wdata) = 0x0200 (value 2.0 in Q8.8)
+       c) Set probe_out3 (input_we)    = 0x1    (write enable ON)
+       d) Wait briefly (1 clock cycle happens automatically)
+       e) Set probe_out3 (input_we)    = 0x0    (write enable OFF)
+       f) Increment address, repeat for next sample
+
+  7.4  Step-by-Step: Start Processing
+       a) Set probe_out1 (start) = 0x1
+       b) Wait 1 cycle
+       c) Set probe_out1 (start) = 0x0
+       d) Watch probe_in0 (done) — it will go HIGH when complete
+
+  7.5  Step-by-Step: Read Output Coefficients
+       a) Confirm probe_in0 (done) = 1
+       b) Set probe_out6 (output_addr) = 0x000 (sample 0)
+       c) Read probe_in4 (output_rdata) — this is the scattering coefficient
+       d) Increment address to read more samples
+
+  7.6  VIO Tips:
+       - Right-click a probe → "Radix" → choose Hex/Unsigned/Signed
+       - For energy_threshold: default 0x00008000 (lowered for testing)
+       - For input_wdata: remember Q8.8 format:
+           0x0100 = 1.0,  0x0200 = 2.0,  0xFF00 = -1.0
+           0x0080 = 0.5,  0x1400 = 20.0
+
+
+================================================================================
+ 8. HARDWARE MANAGER: USING ILA
+================================================================================
+
+  After programming, the ILA dashboard appears (hw_ila_1).
+
+  8.1  ILA Dashboard Layout
+       ┌─────────────────────────────────────────────────────┐
+       │  Waveform Window (top):   Signal traces over time   │
+       │  Trigger Setup (bottom):  Define capture conditions  │
+       │  Status Bar:              Armed / Triggered / Idle   │
+       └─────────────────────────────────────────────────────┘
+
+  8.2  Adding Signals to Waveform
+       - All 8 probes appear automatically
+       - Right-click waveform → Add Probes → select signals
+       - Drag to reorder
+
+  8.3  Basic Capture (no trigger — immediate):
+       a) In ILA dashboard, click "Run Trigger" button (▶)
+           OR: set trigger position to 0 and click play
+       b) ILA captures 4096 samples immediately
+       c) Waveform updates with captured data
+
+  8.4  Changing Radix in Waveform:
+       - Right-click signal name → Radix → Hex / Unsigned / Signed
+       - For current_energy: use Unsigned Decimal
+       - For output_rdata: use Signed Decimal (Q8.8)
+
+
+================================================================================
+ 9. ILA TRIGGERING — COMPLETE GUIDE
+================================================================================
+
+  This is the most powerful feature. Triggers tell ILA WHEN to start
+  capturing data, so you capture exactly the event you care about.
+
+  ─────────────────────────────────────────────────────────
+  9.1  BASIC TRIGGER: Capture on Start Pulse
+  ─────────────────────────────────────────────────────────
+
+    Goal: Capture waveform when processing begins.
+
+    a) In ILA Trigger Setup panel (bottom of ILA dashboard):
+       - Click "+" to add a trigger condition
+       - Select probe0 (start)
+       - Operator: ==
+       - Value: 1'b1  (or R for rising edge)
+    b) Set Trigger Position: 512
+       (This means 512 samples BEFORE trigger are also captured)
+    c) Click "Run Trigger" (▶) — ILA arms and waits
+    d) Now use VIO to pulse start = 1 → 0
+    e) ILA triggers and captures the full processing waveform!
+
+  ─────────────────────────────────────────────────────────
+  9.2  TRIGGER ON DONE: Capture When Processing Completes
+  ─────────────────────────────────────────────────────────
+
+    Goal: See the final state and what happened just before completion.
+
+    a) Trigger Setup → "+" → probe1 (done)
+       - Operator: == (edge)
+       - Value: R (rising edge)   [or 1'b1 for level]
+    b) Trigger Position: 4000
+       (Captures mostly pre-trigger data — see the entire processing)
+    c) Run Trigger → start processing via VIO
+    d) ILA captures around the moment done goes HIGH
+
+  ─────────────────────────────────────────────────────────
+  9.3  TRIGGER ON PRECISION SWITCH (KEY FOR YOUR PROJECT!)
+  ─────────────────────────────────────────────────────────
+
+    Goal: Capture the exact moment when the accelerator switches
+    between 8-bit and 16-bit precision.
+
+    a) Trigger Setup → "+" → probe2 (precision_mode)
+       - Operator: == (edge)
+       - Value: R (rising edge)    ← triggers on switch to 16-bit
+         OR:    F (falling edge)   ← triggers on switch to 8-bit
+         OR:    B (both edges)     ← triggers on any switch
+    b) Trigger Position: 2048  (half-and-half: see before + after)
+    c) Run Trigger → feed data via VIO
+    d) ILA captures the transition between calm→volatile market
+
+  ─────────────────────────────────────────────────────────
+  9.4  TRIGGER ON ENERGY THRESHOLD CROSSING
+  ─────────────────────────────────────────────────────────
+
+    Goal: Capture when signal energy crosses the threshold.
+
+    a) Trigger Setup → "+" → probe3 (current_energy [31:0])
+       - Operator: >=    (greater than or equal)
+       - Value: 32'h00008000  (or whatever your threshold is)
+    b) Trigger Position: 2048
+    c) Run Trigger → feed input data
+    d) See the exact moment energy ramps up past threshold
+
+  ─────────────────────────────────────────────────────────
+  9.5  COMPOUND TRIGGER (AND / OR Multiple Conditions)
+  ─────────────────────────────────────────────────────────
+
+    Goal: Trigger on specific combinations of events.
+
+    a) Add multiple trigger conditions:
+       - Condition 1: probe2 (precision_mode) == 1 (AND)
+       - Condition 2: probe3 (current_energy) >= 0x00010000
+    b) Set Trigger Combination: AND (both must be true)
+       - Click the AND/OR dropdown between conditions
+    c) This triggers only when precision is HIGH AND energy is above 64K
+
+  ─────────────────────────────────────────────────────────
+  9.6  TRIGGER POSITION EXPLAINED
+  ─────────────────────────────────────────────────────────
+
+    Trigger Position = number of samples captured BEFORE the trigger event.
+    Total samples = Sample Data Depth (e.g., 4096).
+
+    ┌──────────────────────────────────────────────────────┐
+    │  Position 0:    [TRIGGER|────── all data after ──→]  │
+    │  Position 512:  [──pre──|TRIGGER|── post data ──→]   │
+    │  Position 2048: [── pre-data ──|TRIGGER|── post ──]  │
+    │  Position 4095: [←── all data before ──|TRIGGER]     │
+    └──────────────────────────────────────────────────────┘
+
+    Recommendations:
+    - Start event:     Position 100  (mostly see what happens after)
+    - Done event:      Position 3900 (mostly see what led to completion)
+    - Precision switch: Position 2048 (see both before and after)
+
+  ─────────────────────────────────────────────────────────
+  9.7  TRIGGER MODES
+  ─────────────────────────────────────────────────────────
+
+    In the ILA Properties panel:
+    - Trigger mode: BASIC  — single trigger condition
+    - Trigger mode: ADVANCED — supports state machines, counters
+    - Capture mode: ALWAYS — capture every sample in window
+    - Capture mode: BASIC  — only capture when a capture condition is met
+                             (allows sparse capture over longer time)
+
+  ─────────────────────────────────────────────────────────
+  9.8  MULTIPLE WINDOWS (Advanced)
+  ─────────────────────────────────────────────────────────
+
+    ILA supports capturing multiple windows (non-contiguous segments):
+    a) In ILA properties → Number of Windows: 2 (or more)
+    b) Window 1 captures first trigger event
+    c) ILA re-arms and captures Window 2 on next trigger
+    d) Useful for: capturing multiple precision switches in one run
+
+
+================================================================================
+ 10. RUNNING A FULL TEST ON HARDWARE
+================================================================================
+
+  Here is the complete step-by-step procedure:
+
+  STEP 1: Program the FPGA
+    → Generate bitstream → Program Device
+
+  STEP 2: Reset
+    → VIO: probe_out0 (rst_n) = 0, wait, then = 1
+
+  STEP 3: Set Energy Threshold
+    → VIO: probe_out2 (energy_threshold) = 0x00008000
+
+  STEP 4: Arm ILA for Precision Switch Capture
+    → ILA: Set trigger on probe2 (precision_mode) rising edge
+    → Set trigger position: 2048
+    → Click "Run Trigger" (▶) — ILA shows "Waiting for Trigger"
+
+  STEP 5: Load Input Data (Calm Market Samples)
+    → For addresses 0 to 127 (calm market, small amplitude):
+       VIO: probe_out4 = address, probe_out5 = data, probe_out3 = 1, then 0
+       Use small values like 0x0080 (0.5), 0x0100 (1.0), 0x0180 (1.5)
+       TIP: Alternate positive/negative to simulate a sinusoid
+
+  STEP 6: Load Input Data (Volatile Market Samples)
+    → For addresses 128 to 255 (volatile, large amplitude):
+       Use large values like 0x1400 (20.0), 0xEC00 (-20.0)
+       → At some point, ILA should TRIGGER on precision switch!
+
+  STEP 7: Examine ILA Capture
+    → ILA waveform shows the exact moment precision_mode went HIGH
+    → Check current_energy to see the energy ramp-up
+    → Verify hysteresis: energy must exceed threshold_high
+
+  STEP 8: Start Processing
+    → Arm ILA again: trigger on probe1 (done) rising edge, position 3900
+    → VIO: probe_out1 (start) = 1, then = 0
+    → Wait for probe_in0 (done) = 1
+    → ILA captures the entire processing waveform
+
+  STEP 9: Read Results
+    → VIO: probe_out6 (output_addr) = 0, 1, 2, ...
+    → Read probe_in4 (output_rdata) for each address
+    → These are your wavelet scattering coefficients!
+
+  STEP 10: Check Metrics
+    → Read probe_in3 (total_cycles) — processing time
+    → Read probe_in2 (current_energy) — final energy level
+    → Read probe_in1 (precision_mode) — which mode was used
+
+
+================================================================================
+ 11. TROUBLESHOOTING
+================================================================================
+
+  PROBLEM: "VIO/ILA not appearing after programming"
+  FIX:     → Ensure top_fpga_debug is the top module
+           → Ensure VIO/ILA IP cores are generated (not just instantiated)
+           → Check: Sources → IP Sources → both should show "generated"
+
+  PROBLEM: "Synthesis error: module vio_control not found"
+  FIX:     → You haven't generated the VIO IP yet
+           → Go to IP Catalog → VIO → generate with name "vio_control"
+
+  PROBLEM: "Timing failure on debug core paths"
+  FIX:     → Add false paths in constraints.xdc (uncomment the lines)
+           → Or reduce clock to 50 MHz
+
+  PROBLEM: "ILA never triggers"
+  FIX:     → Check trigger condition value matches expected signal
+           → Make sure the event actually occurs after arming
+           → Try "Immediate" trigger first to verify ILA works
+
+  PROBLEM: "BRAM not inferred — too many LUTs used"
+  FIX:     → Uncomment RAM_STYLE constraints in constraints.xdc
+           → Check synthesis log for "RAM mapped to" messages
+
+  PROBLEM: "Output data is all zeros"
+  FIX:     → Verify input data was written (check with ILA probe7)
+           → Verify start pulse was sent (check ILA probe0)
+           → Verify done went HIGH (check ILA probe1)
+           → Check if rst_n is HIGH (not held in reset)
+
+  PROBLEM: "Precision never switches"
+  FIX:     → Input data amplitude may be too low
+           → Lower energy_threshold via VIO (try 0x00001000)
+           → Or use larger input values (amplitude > 10.0 in Q8.8)
+
+
+================================================================================
+  ALTERNATIVE APPROACH: mark_debug + Auto-Insert ILA (No Manual IP)
+================================================================================
+
+  Instead of manually instantiating VIO/ILA, you can use Vivado's
+  automatic debug insertion. The code already has mark_debug attributes.
+
+  1. Run Synthesis
+  2. Open Synthesized Design
+  3. Tools → Set Up Debug
+  4. Vivado shows all signals with (* mark_debug = "true" *)
+  5. Click "Next" → set sample depth → "Next" → Finish
+  6. Save constraints → Run Implementation → Generate Bitstream
+
+  This auto-creates ILA cores. However, you STILL need VIO for stimulus
+  (mark_debug only creates ILA, not VIO). So the manual approach with
+  top_fpga_debug.v is recommended for full control.
+
+
+================================================================================
+  Q8.8 FIXED-POINT QUICK REFERENCE (for VIO data entry)
+================================================================================
+
+  Value    │ Hex (Q8.8)  │ Decimal (raw)
+  ─────────┼─────────────┼──────────────
+   0.0     │  0x0000     │  0
+   0.5     │  0x0080     │  128
+   1.0     │  0x0100     │  256
+   2.0     │  0x0200     │  512
+   5.0     │  0x0500     │  1280
+  10.0     │  0x0A00     │  2560
+  20.0     │  0x1400     │  5120
+  -1.0     │  0xFF00     │  65280
+  -5.0     │  0xFB00     │  64256
+  -20.0    │  0xEC00     │  60416
+
+  Formula: hex_value = (int)(value × 256) & 0xFFFF
+
+================================================================================
+  END OF MANUAL
+================================================================================
