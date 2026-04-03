@@ -1,15 +1,3 @@
-"""
-Binary Classification Training — Enhanced Wavelet-Mamba SSM v2
-================================================================
-Structural fixes for precision collapse:
-  1. Enhanced features: Bollinger Bands, ATR, regime labels (14 features)
-  2. Volume-weighted wavelet scattering with temporal deltas
-  3. Regime-conditioned Mamba SSM (delta modulation via ATR)
-  4. Gated classification head with decoupled wavelet energy pathway
-  5. Combined Asymmetric + Differentiable F-beta loss (β=0.5, precision-weighted)
-  6. Layer-wise LR, purged validation, label smoothing 0.1
-"""
-
 import numpy as np
 import pandas as pd
 import matplotlib
