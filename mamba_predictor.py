@@ -1,3 +1,22 @@
+"""
+Wavelet-Mamba Predictor — Enhanced Architecture
+=================================================
+Novel hybrid combining:
+  1. Learnable Wavelet Scattering (multi-scale signal decomposition)
+  2. CryptoMamba-inspired hierarchical C-Block structure
+  3. Multi-scale temporal attention pooling
+  4. Dual-head output (price regression + direction classification)
+
+Key differences from CryptoMamba:
+  - Wavelet scattering front-end (signal processing + deep learning)
+  - Learnable positional encoding
+  - Attention-weighted multi-scale pooling
+  - Multi-task loss with directional consistency
+  - Higher d_state=32 and deeper blocks
+
+Pure PyTorch — no external mamba_ssm dependency.
+"""
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -5,7 +24,9 @@ import math
 from wavelet_scattering import WaveletScatteringNetwork
 
 
-
+# ============================================================================
+# Selective State Space Model (Mamba) — Pure PyTorch
+# ============================================================================
 
 class SelectiveSSM(nn.Module):
     """
@@ -329,7 +350,7 @@ class WaveletMambaPredictor(nn.Module):
 
         # Layer 3: Wavelet scattering (channel-first)
         x_t = x.transpose(1, 2)  # (B, d_model, T)
-        x_t = self.wavelet_scatter(x_t)
+        x_t, _ = self.wavelet_scatter(x_t)
         x = x_t.transpose(1, 2)  # (B, T, d_model)
 
         # Layer 4: C-Block 1 → pools to T/2

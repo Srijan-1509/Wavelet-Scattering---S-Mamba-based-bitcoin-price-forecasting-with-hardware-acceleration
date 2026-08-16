@@ -1,0 +1,90 @@
+Here are the exact locations in your code for both the Mamba iterative element and the threshold decision logic:
+
+### 1. Where is the Mamba "Iterative Element" Happening?
+The actual iterative/recurrent scanning mechanism of Mamba is encapsulated inside the `SelectiveSSM` (Selective State Space Model) module, which is imported from your **`mamba_predictor.py`** file. 
+
+Inside `train_wavelet_mamba_classifier.py`, this element is pulled in and utilized here:
+*   **Imported:** On lines 30-31: `from mamba_predictor import (SelectiveSSM, CMBlock, CBlock...)`
+*   **Instantiated:** On lines 80-85, inside the `__init__` of `WaveletMambaClassifier`, where three `CBlock` (CryptoMamba-style) layers are created (`self.cblock1`, `self.cblock2`, `self.cblock3`). 
+*   **Executed:** On lines 164-167 during the forward pass, where the sequence data passes through these iterative Mamba blocks.
+
+### 2. Where is the "Market Entry Threshold" Decided? (And is it arbitrary?)
+
+You are right that the threshold acts as a confidence measure. However, **it is not arbitrary—your code dynamically searches for the best threshold** based on performance metrics rather than hardcoding it. 
+
+You actually have *two* places where this happens depending on which simulation you ran:
+
+**A. In the Backtesting/Financial Simulation (`evaluate_financial_metrics.py`):**
+If you ran the financial simulation to see your portfolio growth, the threshold is dynamically found by searching for the highest **Sharpe Ratio** (risk-adjusted return).
+*   **The Search Logic:** Look at **lines 78–111** in `evaluate_financial_metrics.py`. The `find_sharpe_optimal_params()` function tests different threshold values between 0.55 and 0.70 (line 90: `for thresh in np.arange(0.55, 0.70, 0.005):`).
+*   **The Execution:** It applies the winning threshold on **line 166**: `signals = (smoothed[:n] > opt_thresh).astype(float)`. If the AI's confidence is above this threshold, it enters a long position. 
+
+**B. In the Classifier Training script (`train_wavelet_mamba_classifier.py`):**
+If the "seldom entry" plot you saw came from the training script's plot function, this script searches for a threshold using classification metrics.
+*   **The Search Logic:** Look at **lines 459–481**. The `optimize_threshold()` function sweeps through thresholds from 0.20 to 0.90 to find the highest *Precision* while keeping *Recall* above 80% (or maximizing the F1 score). 
+*   **The Execution:** The chosen threshold is calculated on line 827 and applied to the test set on **line 837**: `test_preds = (test_probs > opt_thresh).astype(int)`.
+
+**Why it causes "seldom entry":**
+Because these optimization loops are strictly looking for the highest statistical confidence (Precision or Sharpe Ratio) to avoid losing money, the threshold often gets pushed very high (e.g., 0.65+ or 0.70+). A high threshold means the AI will strictly sit on the sidelines in cash unless it is supremely confident, causing the "seldom" market entry dots you observed in your plot.
+
+
+
+Viewed mamba_predictor.py:1-498
+
+I completely understand—Mamba's "recurrence" is notoriously tricky to wrap your head around because it achieves iterative behavior *without actually using a traditional loop* (like a `for` loop). 
+
+Let's break down exactly how this works in your code, specifically looking at **lines 122–138** in `mamba_predictor.py`, which is the `_selective_scan` function. This is the beating heart of Mamba.
+
+### The Traditional Way (RNNs/LSTMs)
+If you were writing a regular recurrent neural network (RNN), you would process the sequence step-by-step using a loop over time $t$:
+`Memory_today = (Forget_Gate * Memory_yesterday) + (Input_Gate * Data_today)`
+
+The problem? You can't process day 100 until day 99 is finished. This makes training extremely slow.
+
+### The Mamba Way (Parallel Scan)
+Mamba relies on State Space Models (SSM). Mathematically, an SSM does the exact same thing as the RNN equation above:
+$h_t = A \cdot h_{t-1} + B \cdot x_t$ 
+
+However, Mamba uses a math trick called a **Parallel Associative Scan**. Because $A$ and $B$ are just multiplications, you can unravel that math equation using cumulative sums across the *entire time sequence at once*, completely skipping the `for` loop.
+
+Here is exactly how your code does it in `_selective_scan`:
+
+**1. The "Forget" Gate (Variable `A`)**
+```python
+log_A_bar = delta.unsqueeze(-1) * A.unsqueeze(0).unsqueeze(0)
+S = log_A_bar.cumsum(dim=1).clamp(-15, 15)  
+exp_S = torch.exp(S)
+## ...
+exp_neg_S = torch.exp(-S)
+```
+*   `A` acts as the memory retention factor (how much of the past to keep).
+*   By taking the cumulative sum (`cumsum`) along `dim=1` (the time dimension), the model calculates the compounded "forgetting" factor for every single time step simultaneously. 
+
+**2. The "Input" Gate (Variable `B`)**
+```python
+B_bar = delta.unsqueeze(-1) * B.unsqueeze(2)
+term = B_bar * x.unsqueeze(-1) * exp_neg_S
+sum_term = term.cumsum(dim=1)
+```
+*   `B` controls how much the *new* input (`x`) should matter. 
+*   It multiplies the new input by the "discounted" memory factor (`exp_neg_S`) and does another cumulative sum (`cumsum`) to accumulate all the new info up to every point in time.
+
+**3. Generating the Hidden State (The "Memory" $h_t$)**
+```python
+h = exp_S * sum_term
+```
+*   It multiplies the cumulative "forgetting" pool by the cumulative "new information" pool to get the final hidden state `h`. This mathematically achieves the exact same result as stepping through an RNN iteratively, but does it in one parallel matrix swoop.
+
+**4. The Final Output Projection (Variable `C`)**
+```python
+y = (h * C.unsqueeze(2)).sum(dim=-1)
+```
+*   The final state `h` is multiplied by `C` to decide what part of the memory is actually relevant to output as the final prediction for that time step.
+
+### Why is this called "Selective"?
+If you look slightly above that function (lines 95–98), you will see that `B`, `C`, and `dt_raw` (which becomes `delta`) are generated via a linear layer right from the input data:
+```python
+x_proj = self.x_proj(x_conv)
+B = x_proj[:, :, :self.d_state]
+```
+This means at $t=10$, Mamba might see high volatility and dynamically adjust `B` to pay *more* attention to the input and `A` to forget the distant past. It "selects" what to remember based on what it's looking at, very similarly to an LSTM, but processes it blazingly fast using the parallel scan matrix math outlined above.

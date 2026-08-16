@@ -148,17 +148,17 @@ module wavelet_filterbank #(
     assign conv_idx = $signed({2'b00, n_idx}) - $signed({8'd0, k_idx}) 
                       + $signed(KERNEL_SIZE / 2);
     
-    // Truncation for 8-bit mode: Q4.4 input, Q1.7 coefficient
+    // Truncation for 8-bit mode: take upper 8 bits of input and coefficient
     wire signed [7:0] input_8bit;
     wire signed [7:0] coeff_8bit;
-    assign input_8bit = input_data[11:4];   // Q4.4 (4 integer + 4 fractional)
+    assign input_8bit = input_data[15:8];   // Q8.0 (integer part)
     assign coeff_8bit = coeff[15:8];         // Q1.7 upper
-
+    
     // MAC results for each precision mode
     wire signed [31:0] mac_16bit;
     wire signed [15:0] mac_8bit;
-    assign mac_16bit = $signed(input_data) * coeff;  // Q8.8 × Q1.15 = Q9.23
-    assign mac_8bit  = $signed(input_8bit) * $signed(coeff_8bit);  // Q4.4 × Q1.7 = Q5.11
+    assign mac_16bit = $signed({1'b0, input_data}) * $signed({1'b0, coeff});
+    assign mac_8bit  = $signed(input_8bit) * $signed(coeff_8bit);
     
     // Modulus approximation: |x| ≈ max(|real|, |imag|) + 0.5 * min(|real|, |imag|)
     // For real-only wavelet, we just take |acc_real|

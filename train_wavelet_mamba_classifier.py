@@ -1,3 +1,15 @@
+"""
+Binary Classification Training — Enhanced Wavelet-Mamba SSM v2
+================================================================
+Structural fixes for precision collapse:
+  1. Enhanced features: Bollinger Bands, ATR, regime labels (14 features)
+  2. Volume-weighted wavelet scattering with temporal deltas
+  3. Regime-conditioned Mamba SSM (delta modulation via ATR)
+  4. Gated classification head with decoupled wavelet energy pathway
+  5. Combined Asymmetric + Differentiable F-beta loss (β=0.5, precision-weighted)
+  6. Layer-wise LR, purged validation, label smoothing 0.1
+"""
+
 import numpy as np
 import pandas as pd
 import matplotlib
@@ -253,44 +265,31 @@ def preprocess_data(csv_path='btc_15m_data_2018_to_2025.csv',
     print("BINARY CLASSIFICATION DATA PREPROCESSING v2")
     print("=" * 80)
 
-    df = pd.read_csv(csv_path)
-    for col in ['Open', 'High', 'Low', 'Close', 'Volume']:
-        df[col] = pd.to_numeric(df[col], errors='coerce')
-    df.dropna(subset=['Open', 'High', 'Low', 'Close', 'Volume'], inplace=True)
-    df.reset_index(drop=True, inplace=True)
-    print(f"[*] Total rows: {len(df)}")
+    print("[*] Loading base preprocessing from wavelet_mamba_preprocess.py...")
+    from wavelet_mamba_preprocess import WaveletMambaProcessor
+    processor = WaveletMambaProcessor(csv_path=csv_path, window_size=window_size, split_ratio=split_ratio)
+    base_features, close_arr = processor.load_and_engineer_features()
+    
+    print(f"[*] Total rows after base prep: {len(close_arr)}")
 
     # ===== Engineer RELATIVE features only (12 total) =====
     # NO absolute prices — only normalized/relative features for direction prediction
     features = pd.DataFrame()
-    close_arr = df['Close'].values
-    high_arr = df['High'].values
-    low_arr = df['Low'].values
-    open_arr = df['Open'].values
     close_series = pd.Series(close_arr)
+    high_arr = base_features['high'].values
+    low_arr = base_features['low'].values
+    open_arr = base_features['open'].values
 
-    # Feature 0: log_volume (relative, scale-invariant)
-    features['log_volume'] = np.log1p(df['Volume'].values)
+    # Feature 0-4: reuse from the primary processor
+    features['log_volume'] = base_features['log_volume']
+    features['returns'] = base_features['returns']
+    features['rsi'] = base_features['rsi']
+    features['macd'] = base_features['macd']
+    features['volatility'] = base_features['volatility']
 
-    # Feature 1: returns (pct change)
-    features['returns'] = df['Close'].pct_change().fillna(0).clip(-0.1, 0.1).values
-
-    # Feature 2: RSI (bounded 0-100)
-    delta_price = close_series.diff()
-    gain = delta_price.where(delta_price > 0, 0.0).rolling(14, min_periods=1).mean()
-    loss_v = (-delta_price.where(delta_price < 0, 0.0)).rolling(14, min_periods=1).mean()
-    rs = gain / (loss_v + 1e-10)
-    features['rsi'] = (100 - 100 / (1 + rs)).fillna(50).values
-
-    # Feature 3: MACD histogram (relative)
+    # Need ema12 and ema26 for later EMA Cross calculation
     ema12 = close_series.ewm(span=12, adjust=False).mean()
     ema26 = close_series.ewm(span=26, adjust=False).mean()
-    macd_line = ema12 - ema26
-    features['macd'] = (macd_line - macd_line.ewm(span=9, adjust=False).mean()).fillna(0).values
-
-    # Feature 4: volatility (rolling std of returns)
-    features['volatility'] = pd.Series(features['returns'].values).rolling(
-        14, min_periods=1).std().fillna(0).values
 
     # Feature 5: Bollinger %B (normalized position 0-1)
     sma20 = close_series.rolling(20, min_periods=1).mean()
@@ -629,8 +628,8 @@ def main():
 
     # ===== Fine-tuned Hyperparameters v2 =====
     WINDOW_SIZE = 64
-    HORIZON = 4           # predict 1-hour ahead direction
-    THRESHOLD = 0.001     # 0.1% min movement for clear signal
+    HORIZON = 16          # predict 4-hours ahead direction (16 × 15min)
+    THRESHOLD = 0.005     # 0.5% min movement for clear signal
     EPOCHS = 120
     BATCH_SIZE = 256
     LR = 1.5e-4           # lower for stability
@@ -646,6 +645,7 @@ def main():
     GAMMA_NEG = 4.0
     PURGE_GAP = 256
     FBETA = 0.5
+    RESUME = True         # Resume from wmc_best_model.pth if it exists
 
     # ===== Preprocess =====
     (X_train, X_test, y_train, y_test,
@@ -691,6 +691,11 @@ def main():
         d_model=D_MODEL, d_state=D_STATE, dropout=DROPOUT
     ).to(device)
     print(f"[*] Parameters: {model.count_parameters():,}")
+
+    if RESUME and os.path.exists('wmc_best_model.pth'):
+        print("[*] Resuming from saved wmc_best_model.pth...")
+        model.load_state_dict(torch.load('wmc_best_model.pth', weights_only=True, map_location=device))
+        print("[OK] Loaded pre-trained weights successfully!")
 
     # ===== Loss =====
     criterion = CombinedClassificationLoss(
